@@ -1,0 +1,9 @@
+{
+  "name": "com.idlix.tv.webos.proxy",
+  "version": "1.0.5",
+  "description": "HTTP client with Android-equivalent Origin/Referer (OkHttp parity)",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js"
+  }
+}

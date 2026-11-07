@@ -1,0 +1,12 @@
+{
+  "id": "com.idlix.tv.webos.proxy",
+  "description": "Bullix HTTP proxy matching Android TV Origin/Referer headers",
+  "engine": "node",
+  "enabled": true,
+  "services": [
+    {
+      "name": "com.idlix.tv.webos.proxy",
+      "description": "Local reverse proxy for API and HLS"
+    }
+  ]
+}

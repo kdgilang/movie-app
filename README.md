@@ -61,8 +61,15 @@ idlix-androidtv/
 ├── settings.gradle.kts
 ├── gradle.properties
 ├── PANDUAN_INSTALASI_TV.md              # Panduan instalasi ramah pemula
+├── webos/                               # Versi LG webOS (HTML5 + hls.js, paket IPK)
+│   ├── README.md                        # Build & package dengan webOS CLI
+│   └── …
 └── README.md
 ```
+
+### 📺 Versi LG webOS
+
+Untuk TV LG (webOS), gunakan proyek di folder **[`webos/`](webos/README.md)**: antarmuka web yang berbicara ke API yang sama dan memutar HLS dengan **hls.js**. Lihat [`webos/README.md`](webos/README.md) untuk `npm install`, build, dan perintah `ares-package` / `ares-install`.
 
 ---
 

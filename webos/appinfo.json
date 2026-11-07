@@ -1,0 +1,15 @@
+{
+  "id": "com.idlix.tv.webos",
+  "version": "1.0.14",
+  "vendor": "bullix",
+  "type": "web",
+  "main": "index.html",
+  "title": "Bullix TV",
+  "icon": "icon.png",
+  "largeIcon": "icon-large.png",
+  "resolution": "1920x1080",
+  "supportGWM": true,
+  "transparent": false,
+  "uiRevision": 2,
+  "requiredACG": []
+}

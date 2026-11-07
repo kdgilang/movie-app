@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta http-equiv="Content-Security-Policy" content="default-src * blob: data: 'unsafe-inline' 'unsafe-eval'; script-src * blob: 'unsafe-inline' 'unsafe-eval'; style-src * 'unsafe-inline'; img-src * data: blob: http: https:; media-src * blob: data: http: https:; connect-src * blob: http: https: ws: wss:; worker-src blob: * 'self'; font-src * data:;">
+  <title>Bullix TV</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app"><p style="padding:2rem;color:#e5e5e5;font-family:sans-serif;font-size:22px">Memuat Bullix…</p></div>
+  <script>
+    window.__idlixShowError = function (msg) {
+      var el = document.getElementById("app");
+      if (el) {
+        el.innerHTML =
+          '<p style="padding:2rem;color:#fca5a5;font-family:sans-serif;font-size:20px">' +
+          String(msg).replace(/</g, "&lt;") +
+          "</p>";
+      }
+    };
+    window.onerror = function (msg, _src, _line, _col, err) {
+      window.__idlixShowError((err && err.message) || msg);
+    };
+  </script>
+  <script src="webOSTV.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
