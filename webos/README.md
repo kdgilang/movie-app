@@ -123,33 +123,25 @@ Replace `mytv` and the `.ipk` filename if yours differs (`ls *.ipk`).
 
 3. A red error line on screen means JavaScript failed — note the message from the inspector console.
 
-## Local preview + playback proxy (Chromium)
+## Local preview + playback proxy
 
-Claim (`POST /api/watch/session/claim`) is rejected unless `Origin` is `https://z2.idlixku.com`. Browsers cannot set that header. `npm run serve` starts **Playwright Chromium**, opens the API site (solves Cloudflare), then proxies `/p?u=…` as **same-origin** requests — same idea as Android OkHttp.
+Claim needs `Origin: https://z2.idlixku.com`. The browser cannot set that. `npm run serve` is a Node proxy: **`curl_cffi` Chrome TLS** if `.venv-impersonate` exists (`/health` has `"impersonate": true`), otherwise Node `https`.
 
 ```bash
 cd webos
+python3 -m venv .venv-impersonate
+.venv-impersonate/bin/pip install -r scripts/requirements-impersonate.txt
 npm install
 npm run serve
 ```
 
-First run downloads Chromium (slow once). Open **http://127.0.0.1:5173**.
+Open **http://127.0.0.1:5173**.
 
-**Without Chromium** (`npm run serve:node`): uses **`curl_cffi` Chrome TLS** if `.venv-impersonate` exists (`/health` has `"impersonate": true`). Otherwise Node/curl (often CF 403).
+### Play on the LG TV
 
-```bash
-python3 -m venv .venv-impersonate
-.venv-impersonate/bin/pip install -r scripts/requirements-impersonate.txt
-npm run serve:node
-```
-
-Use `npm run serve` only if CF still serves a JS challenge.
-
-### Play on the LG TV (TV-only)
-
-1. `npm run package` → install the IPK on the TV (`ares-install` / Developer Mode).
-2. Empty proxy URL: watch APIs use **Luna `proxyFetch`** (TV curl/Node).
-3. To use the PC proxy: `npm run serve:node`, same Wi‑Fi, **Pengaturan → URL proxy PC** = `http://<PC-LAN-IP>:5173` (printed in the terminal — **not** `127.0.0.1`). The app skips Luna and sends claim/HLS to that host.
+1. `npm run package` → install the IPK (`ares-install` / Developer Mode).
+2. Empty proxy URL: watch APIs use **Luna `proxyFetch`** (TV Node).
+3. PC proxy: keep `npm run serve` running, same Wi‑Fi, **Pengaturan → URL proxy PC** = `http://<PC-LAN-IP>:5173` (**not** `127.0.0.1`). The app skips Luna.
 
 ## CSP
 

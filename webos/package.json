@@ -5,8 +5,7 @@
   "description": "Bullix TV client for LG webOS (HTML5 + vanilla JS)",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "serve": "npm run build && npx playwright install chromium && node scripts/dev-server.mjs",
-    "serve:node": "npm run build && IDLIX_NO_CHROMIUM=1 node scripts/dev-server.mjs",
+    "serve": "npm run build && node scripts/dev-server.mjs",
     "package": "npm run build && npx ares-package dist ./service/com.idlix.tv.webos.proxy -o ."
   },
   "dependencies": {
@@ -15,7 +14,6 @@
   "devDependencies": {
     "@webos-tools/cli": "^3.0.2",
     "esbuild": "^0.24.0",
-    "playwright": "^1.49.0",
     "pngjs": "^7.0.0"
   }
 }

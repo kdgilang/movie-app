@@ -262,16 +262,16 @@ function htmlForbiddenMessage(status, text) {
   const body = String(text || "");
   if (/Cross-site request blocked/i.test(body)) {
     return isWebOSTv()
-      ? "Claim ditolak (Origin). Isi Pengaturan → URL proxy PC (npm run serve:node, IP LAN)."
-      : "Claim ditolak (Origin). Jalankan npm run serve:node.";
+      ? "Claim ditolak (Origin). Isi Pengaturan → URL proxy PC (npm run serve, IP LAN)."
+      : "Claim ditolak (Origin). Jalankan npm run serve.";
   }
   if (/Just a moment|cf-mitigated|challenges\.cloudflare|cdn-cgi/i.test(body)) {
     return isWebOSTv()
-      ? "Cloudflare. Pastikan serve:node + .venv-impersonate, URL PC = IP LAN (bukan 127.0.0.1)."
-      : "Cloudflare. npm run serve:node dengan .venv-impersonate (bukan Chromium).";
+      ? "Cloudflare. Pastikan npm run serve + .venv-impersonate, URL PC = IP LAN (bukan 127.0.0.1)."
+      : "Cloudflare. npm run serve dengan .venv-impersonate.";
   }
   if (Number(status) === 403 || /<!DOCTYPE|<html/i.test(body)) {
-    return "403 HTML (Cloudflare). TV: Pengaturan → URL proxy PC dari npm run serve:node.";
+    return "403 HTML (Cloudflare). TV: Pengaturan → URL proxy PC dari npm run serve.";
   }
   return body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
 }
@@ -415,7 +415,7 @@ async function ensureProxy(opts = {}) {
       if (pref) {
         if (isLoopbackProxy(pref)) {
           throw new Error(
-            "URL proxy PC tidak boleh 127.0.0.1 (itu TV, bukan Mac). Isi http://IP-LAN:5173 dari npm run serve:node."
+            "URL proxy PC tidak boleh 127.0.0.1 (itu TV, bukan Mac). Isi http://IP-LAN:5173 dari npm run serve."
           );
         }
         try {
@@ -426,7 +426,7 @@ async function ensureProxy(opts = {}) {
           return proxyBase;
         } catch (e) {
           throw new Error(
-            `Proxy PC tidak terjangkau (${pref}). npm run serve:node + .venv-impersonate? Satu Wi‑Fi? Mac firewall? ${e && e.message ? e.message : e}`
+            `Proxy PC tidak terjangkau (${pref}). npm run serve + .venv-impersonate? Satu Wi‑Fi? Mac firewall? ${e && e.message ? e.message : e}`
           );
         }
       }
@@ -441,7 +441,7 @@ async function ensureProxy(opts = {}) {
       const hint =
         "Pasang ulang IPK terbaru (npm run package) jika layanan proxy ikut ter-bundle.";
       throw new Error(
-        `Proxy bawaan TV gagal${builtinErr?.message ? `: ${builtinErr.message}` : ""}. ${hint} Opsional: Pengaturan → URL proxy PC (npm run serve:node).`
+        `Proxy bawaan TV gagal${builtinErr?.message ? `: ${builtinErr.message}` : ""}. ${hint} Opsional: Pengaturan → URL proxy PC (npm run serve).`
       );
     }
 
@@ -456,7 +456,7 @@ async function ensureProxy(opts = {}) {
     proxyReady = null;
     if (isLocalBrowser()) {
       throw new Error(
-        `Jalankan npm run serve:node. ${err && err.message ? err.message : err}`
+        `Jalankan npm run serve. ${err && err.message ? err.message : err}`
       );
     }
     if (isWebOSTv()) {
@@ -1480,12 +1480,12 @@ function renderSettings() {
       <p style="color:#a3a3a3;font-size:14px;margin-top:12px">Default: https://z2.idlixku.com/</p>
     </div>
     <div class="settings-block">
-      <label for="playback-proxy">URL proxy PC (npm run serve:node)</label>
+      <label for="playback-proxy">URL proxy PC (npm run serve)</label>
       <input id="playback-proxy" type="url" placeholder="kosongkan untuk TV saja" value="${escapeHtml(proxyPref)}" autocomplete="off" />
       <div class="btn-row" style="margin-top:16px">
         <button class="btn btn--primary" type="button" id="save-proxy">Simpan proxy</button>
       </div>
-      <p style="color:#a3a3a3;font-size:14px;margin-top:12px">Jika diisi, TV memakai PC ini (Luna dilewati). Pakai IP LAN, bukan 127.0.0.1: http://192.168.x.x:5173 dari npm run serve:node, satu Wi‑Fi. Kosongkan untuk proxy bawaan TV.</p>
+      <p style="color:#a3a3a3;font-size:14px;margin-top:12px">Jika diisi, TV memakai PC ini (Luna dilewati). Pakai IP LAN, bukan 127.0.0.1: http://192.168.x.x:5173 dari npm run serve, satu Wi‑Fi. Kosongkan untuk proxy bawaan TV.</p>
     </div>
     <div class="settings-block">
       <button class="btn btn--secondary" type="button" id="clear-history">Hapus riwayat tontonan</button>
@@ -2315,7 +2315,7 @@ async function renderPlayer(params) {
         if (!data.fatal) return;
         const hint = httpCode ? ` (HTTP ${httpCode})` : "";
         showPlayerError(
-          `HLS: ${detail}${hint}. Cek Pengaturan URL proxy PC (npm run serve:node, IP LAN). Tekan Putar atau Kembali.`
+          `HLS: ${detail}${hint}. Cek Pengaturan URL proxy PC (npm run serve, IP LAN). Tekan Putar atau Kembali.`
         );
       });
       hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {

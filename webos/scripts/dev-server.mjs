@@ -1,23 +1,14 @@
 /**
- * Local dev: static app + playback proxy on /p?u=
- * Default: Playwright Chromium (Cloudflare + same-origin idlixku).
- * IDLIX_NO_CHROMIUM=1 or --no-chromium: Node/curl only (Android-like headers, no browser).
+ * Local preview + playback proxy on /p?u=
+ * curl_cffi Chrome TLS when .venv-impersonate exists; else Node https.
  */
 import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, exec } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import { fileURLToPath, URL as NodeURL } from "node:url";
-
-const execAsync = promisify(exec);
-
-const NO_CHROMIUM =
-  process.env.IDLIX_NO_CHROMIUM === "1" ||
-  process.env.NODE_PROXY === "1" ||
-  process.argv.includes("--no-chromium");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(__dirname, "..", "dist");
@@ -26,9 +17,6 @@ const HOST = process.env.HOST || "0.0.0.0";
 const SITE = "https://z2.idlixku.com/";
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const PROFILE = path.join(os.tmpdir(), "idlix-pw-profile");
-const COOKIE_JAR = path.join(os.tmpdir(), "bullix-dev-proxy-cookies.txt");
-
 const ANDROID_HEADERS = {
   Accept: "application/json, text/plain, */*",
   "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
@@ -43,7 +31,6 @@ const ANDROID_HEADERS = {
   "Sec-Fetch-Site": "same-origin",
 };
 
-let curlAvailable = null;
 let impersonateProc = null;
 let impersonateReady = null;
 let impersonateSeq = 0;
@@ -58,11 +45,7 @@ const MIME = {
   ".map": "application/json",
 };
 
-let browserContext = null;
-let sitePage = null;
 let publicOrigin = `http://127.0.0.1:${PORT}`;
-let warmupTitle = "";
-let warmupChallenged = false;
 
 function lanIPs() {
   const out = [];
@@ -131,77 +114,6 @@ function looksLikePlaylist(ct, body, targetUrl) {
   return head.indexOf("#EXTM3U") === 0;
 }
 
-function isChallengeTitle(title) {
-  return /just a moment|attention required|cloudflare/i.test(String(title || ""));
-}
-
-function launchOpts(headed) {
-  return {
-    headless: !headed,
-    userAgent: UA,
-    viewport: { width: 1280, height: 720 },
-    ignoreHTTPSErrors: true,
-    extraHTTPHeaders: {
-      "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
-    },
-    args: ["--disable-blink-features=AutomationControlled"],
-  };
-}
-
-async function openPersistent(headed) {
-  const { chromium } = await import("playwright");
-  const opts = launchOpts(headed);
-  try {
-    return await chromium.launchPersistentContext(PROFILE, { ...opts, channel: "chrome" });
-  } catch {
-    return await chromium.launchPersistentContext(PROFILE, opts);
-  }
-}
-
-async function waitOutChallenge(page, ms) {
-  try {
-    await page.waitForFunction(
-      () => !/just a moment|attention required/i.test(document.title || ""),
-      { timeout: ms }
-    );
-  } catch {
-    /* still challenged */
-  }
-}
-
-async function bootChromium() {
-  console.log("Launching Chromium (Cloudflare + same-origin claim)…");
-  fs.mkdirSync(PROFILE, { recursive: true });
-  let headed = process.env.IDLIX_HEADED === "1";
-  browserContext = await openPersistent(headed);
-  sitePage = browserContext.pages()[0] || (await browserContext.newPage());
-  try {
-    await sitePage.goto(SITE, { waitUntil: "domcontentloaded", timeout: 90000 });
-    await sitePage.waitForTimeout(4000);
-    await waitOutChallenge(sitePage, 90000);
-    warmupTitle = await sitePage.title();
-    warmupChallenged = isChallengeTitle(warmupTitle);
-    if (warmupChallenged && !headed && process.env.IDLIX_HEADED !== "0") {
-      console.warn("Cloudflare still challenging headless Chromium — retrying headed…");
-      await browserContext.close();
-      headed = true;
-      browserContext = await openPersistent(true);
-      sitePage = browserContext.pages()[0] || (await browserContext.newPage());
-      await sitePage.goto(SITE, { waitUntil: "domcontentloaded", timeout: 90000 });
-      await waitOutChallenge(sitePage, 120000);
-      warmupTitle = await sitePage.title();
-      warmupChallenged = isChallengeTitle(warmupTitle);
-    }
-    console.log(
-      "Chromium on z2.idlixku.com — title:",
-      warmupTitle,
-      warmupChallenged ? "(CHALLENGED)" : "(ok)"
-    );
-  } catch (e) {
-    console.warn("Warmup navigation:", e.message || e);
-  }
-}
-
 function hostOf(url) {
   try {
     return new NodeURL(url).hostname;
@@ -210,110 +122,11 @@ function hostOf(url) {
   }
 }
 
-function shouldUsePageFetch(targetUrl) {
+function shouldImpersonate(targetUrl) {
   const host = hostOf(targetUrl);
   if (!/(^|\.)idlixku\.com$/i.test(host)) return false;
   if (/\.(ts|m4s|mp4|m4a|key)(\?|$)/i.test(targetUrl)) return false;
   return true;
-}
-
-async function ensureSitePage() {
-  if (!browserContext) throw new Error("Chromium not ready");
-  if (!sitePage || sitePage.isClosed()) {
-    sitePage = await browserContext.newPage();
-  }
-  const href = sitePage.url() || "";
-  if (!/idlixku\.com/i.test(href) || isChallengeTitle(await sitePage.title().catch(() => ""))) {
-    await sitePage.goto(SITE, { waitUntil: "domcontentloaded", timeout: 90000 });
-    await waitOutChallenge(sitePage, 60000);
-  }
-}
-
-async function pageFetch(targetUrl, method, reqHeaders, bodyBuf) {
-  await ensureSitePage();
-  const headers = {
-    Accept: reqHeaders.accept || reqHeaders.Accept || "application/json, text/plain, */*",
-  };
-  const ct = reqHeaders["content-type"] || reqHeaders["Content-Type"];
-  if (ct) headers["Content-Type"] = ct;
-  const cookie = reqHeaders["x-idlix-cookie"] || reqHeaders["X-Idlix-Cookie"] || "";
-  const bodyB64 = bodyBuf && bodyBuf.length ? bodyBuf.toString("base64") : "";
-  const result = await sitePage.evaluate(
-    async ({ url, method, headers, bodyB64, cookie }) => {
-      if (cookie) {
-        String(cookie)
-          .split(";")
-          .forEach((part) => {
-            const bit = part.trim();
-            if (bit) document.cookie = `${bit}; path=/`;
-          });
-      }
-      const init = { method, headers, credentials: "include" };
-      if (bodyB64) {
-        const binary = atob(bodyB64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        init.body = bytes;
-      }
-      const res = await fetch(url, init);
-      const buf = await res.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let binary = "";
-      const CHUNK = 0x8000;
-      for (let i = 0; i < bytes.length; i += CHUNK) {
-        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
-      }
-      const outHeaders = {};
-      res.headers.forEach((v, k) => {
-        outHeaders[k] = v;
-      });
-      return { status: res.status, headers: outHeaders, bodyB64: btoa(binary) };
-    },
-    { url: targetUrl, method: method || "GET", headers, bodyB64, cookie }
-  );
-  const body = Buffer.from(result.bodyB64, "base64");
-  return {
-    status: () => result.status,
-    headers: () => result.headers || {},
-    body: async () => body,
-  };
-}
-
-async function apiFetch(targetUrl, method, reqHeaders, bodyBuf) {
-  if (!browserContext) throw new Error("Chromium not ready");
-  const headers = {
-    Accept: "application/json, text/plain, */*",
-    Origin: "https://z2.idlixku.com",
-    Referer: "https://z2.idlixku.com/",
-    "User-Agent": UA,
-  };
-  const ct = reqHeaders["content-type"];
-  if (ct) headers["Content-Type"] = ct;
-  const cookie = reqHeaders["x-idlix-cookie"];
-  if (cookie) headers.Cookie = cookie;
-
-  const opts = {
-    method: method || "GET",
-    headers,
-    timeout: 45000,
-    failOnStatusCode: false,
-    maxRedirects: 10,
-  };
-  if (bodyBuf && bodyBuf.length && method !== "GET" && method !== "HEAD") {
-    opts.data = bodyBuf;
-  }
-  return browserContext.request.fetch(targetUrl, opts);
-}
-
-async function chromiumFetch(targetUrl, method, reqHeaders, bodyBuf) {
-  if (shouldUsePageFetch(targetUrl)) {
-    try {
-      return await pageFetch(targetUrl, method, reqHeaders, bodyBuf);
-    } catch (err) {
-      console.warn("page fetch failed, falling back to APIRequest:", err.message || err);
-    }
-  }
-  return apiFetch(targetUrl, method, reqHeaders, bodyBuf);
 }
 
 function headerFromReq(reqHeaders, name) {
@@ -323,7 +136,7 @@ function headerFromReq(reqHeaders, name) {
 
 function outboundNodeHeaders(reqHeaders, targetUrl) {
   const headers = { ...ANDROID_HEADERS };
-  if (!shouldUsePageFetch(targetUrl || "")) {
+  if (!shouldImpersonate(targetUrl || "")) {
     delete headers["Sec-Fetch-Site"];
     delete headers["Sec-Fetch-Mode"];
     delete headers["Sec-Fetch-Dest"];
@@ -439,17 +252,6 @@ function impersonateFetch(targetUrl, method, reqHeaders, bodyBuf) {
   });
 }
 
-async function detectCurl() {
-  if (curlAvailable !== null) return curlAvailable;
-  try {
-    await execAsync("curl --version");
-    curlAvailable = true;
-  } catch {
-    curlAvailable = false;
-  }
-  return curlAvailable;
-}
-
 function nodeHttpFetch(targetUrl, method, reqHeaders, bodyBuf) {
   return new Promise((resolve, reject) => {
     let parsed;
@@ -495,62 +297,8 @@ function nodeHttpFetch(targetUrl, method, reqHeaders, bodyBuf) {
   });
 }
 
-function curlFetch(targetUrl, method, reqHeaders, bodyBuf) {
-  return new Promise((resolve, reject) => {
-    const headers = outboundNodeHeaders(reqHeaders, targetUrl);
-    const m = method || "GET";
-    const args = [
-      "-sS",
-      "-L",
-      "--compressed",
-      "--max-time",
-      "45",
-      "-w",
-      "\n__CURL_STATUS__:%{http_code}",
-      "-X",
-      m,
-      "-A",
-      UA,
-      "-b",
-      COOKIE_JAR,
-      "-c",
-      COOKIE_JAR,
-    ];
-    Object.entries(headers).forEach(([k, v]) => {
-      args.push("-H", `${k}: ${v}`);
-    });
-    args.push(targetUrl);
-    const child = spawn("curl", args, { stdio: ["pipe", "pipe", "pipe"] });
-    const out = [];
-    child.stdout.on("data", (c) => out.push(c));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      let buf = Buffer.concat(out);
-      let text = buf.toString("utf8");
-      let status = code === 0 ? 200 : 502;
-      const mark = "\n__CURL_STATUS__:";
-      const idx = text.lastIndexOf(mark);
-      if (idx >= 0) {
-        status = parseInt(text.slice(idx + mark.length), 10) || status;
-        buf = Buffer.from(text.slice(0, idx), "utf8");
-      }
-      resolve({
-        status: () => status,
-        headers: () => ({}),
-        body: async () => buf,
-      });
-    });
-    if (bodyBuf?.length) {
-      child.stdin.write(bodyBuf);
-    }
-    child.stdin.end();
-  });
-}
-
 async function nodeProxyFetch(targetUrl, method, reqHeaders, bodyBuf) {
-  // Same split as Chromium: impersonate only idlixku JSON/API.
-  // HLS/CDN must stay on Node (parallel binary). Serial Python .ts kills TV playback.
-  if (impersonateProc && shouldUsePageFetch(targetUrl)) {
+  if (impersonateProc && shouldImpersonate(targetUrl)) {
     try {
       return await impersonateFetch(targetUrl, method, reqHeaders, bodyBuf);
     } catch (err) {
@@ -561,16 +309,10 @@ async function nodeProxyFetch(targetUrl, method, reqHeaders, bodyBuf) {
 }
 
 async function upstreamFetch(targetUrl, method, reqHeaders, bodyBuf) {
-  if (NO_CHROMIUM) return nodeProxyFetch(targetUrl, method, reqHeaders, bodyBuf);
-  return chromiumFetch(targetUrl, method, reqHeaders, bodyBuf);
+  return nodeProxyFetch(targetUrl, method, reqHeaders, bodyBuf);
 }
 
 async function warmupNodeProxy() {
-  try {
-    fs.mkdirSync(path.dirname(COOKIE_JAR), { recursive: true });
-  } catch {
-    /* ignore */
-  }
   try {
     await upstreamFetch(SITE, "GET", {}, Buffer.alloc(0));
     console.log("Node proxy warmup:", SITE);
@@ -684,11 +426,9 @@ const server = http.createServer((req, res) => {
     res.end(
       JSON.stringify({
         ok: true,
-        chromium: !!browserContext,
-        nodeProxy: NO_CHROMIUM,
+        nodeProxy: true,
         impersonate: !!impersonateProc,
-        challenged: warmupChallenged,
-        title: warmupTitle,
+        chromium: false,
         base: publicOrigin,
       })
     );
@@ -707,39 +447,22 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res);
 });
 
-if (NO_CHROMIUM) {
-  const impersonateOn = await startImpersonateWorker();
-  if (impersonateOn) {
-    console.log("TLS impersonate chrome131 (curl_cffi) — no Playwright.");
-  } else {
-    console.log(
-      "IDLIX_NO_CHROMIUM=1 — Node/curl proxy (no Playwright). Claim may fail if Cloudflare blocks."
-    );
-    console.log(
-      "For Chrome TLS: python3 -m venv .venv-impersonate && .venv-impersonate/bin/pip install -r scripts/requirements-impersonate.txt"
-    );
-  }
-  await warmupNodeProxy();
+const impersonateOn = await startImpersonateWorker();
+if (impersonateOn) {
+  console.log("TLS impersonate chrome131 (curl_cffi).");
 } else {
-  try {
-    await bootChromium();
-  } catch (e) {
-    console.error("Chromium failed. Run: npx playwright install chromium");
-    console.error("Or: npm run serve:node (no Chromium, may not pass Cloudflare)");
-    console.error(e);
-    process.exit(1);
-  }
+  console.log("Node https proxy (no impersonate). Claim may fail Cloudflare.");
+  console.log(
+    "For Chrome TLS: python3 -m venv .venv-impersonate && .venv-impersonate/bin/pip install -r scripts/requirements-impersonate.txt"
+  );
 }
+await warmupNodeProxy();
 
 server.listen(PORT, HOST, () => {
   const ips = lanIPs();
   publicOrigin = `http://127.0.0.1:${PORT}`;
-  if (NO_CHROMIUM) {
-    console.log(`Bullix preview (node proxy): http://127.0.0.1:${PORT}`);
-  } else {
-    console.log(`Bullix preview: http://127.0.0.1:${PORT}`);
-  }
+  console.log(`Bullix preview: http://127.0.0.1:${PORT}`);
   ips.forEach((ip) => {
-    console.log(`TV playback proxy: http://${ip}:${PORT}  (Pengaturan → URL proxy pemutaran)`);
+    console.log(`TV playback proxy: http://${ip}:${PORT}  (Pengaturan → URL proxy PC)`);
   });
 });
