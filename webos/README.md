@@ -96,7 +96,7 @@ npx ares-device --device mytv --system-info
 
 ```bash
 npm run package
-npx ares-install --device mytv com.idlix.tv.webos_1.0.9_all.ipk
+npx ares-install --device mytv com.idlix.tv.webos_1.0.17_all.ipk
 npx ares-launch --device mytv com.idlix.tv.webos
 ```
 
@@ -109,7 +109,7 @@ Replace `mytv` and the `.ipk` filename if yours differs (`ls *.ipk`).
    ```bash
    cd webos
    npm run package
-   npx ares-install --device mytv com.idlix.tv.webos_1.0.9_all.ipk
+   npx ares-install --device mytv com.idlix.tv.webos_1.0.17_all.ipk
    npx ares-launch --device mytv com.idlix.tv.webos
    ```
 
