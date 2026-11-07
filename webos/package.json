@@ -6,7 +6,6 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "serve": "npm run build && npx playwright install chromium && node scripts/dev-server.mjs",
-    "serve:chrome": "npm run build && node scripts/dev-server.mjs & sleep 1 && open -na 'Google Chrome' --args --disable-web-security --user-data-dir=/tmp/idlix-chrome-dev http://127.0.0.1:5173",
     "package": "npm run build && npx ares-package dist ./service/com.idlix.tv.webos.proxy -o ."
   },
   "dependencies": {

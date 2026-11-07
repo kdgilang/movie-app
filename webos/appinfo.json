@@ -1,6 +1,6 @@
 {
   "id": "com.idlix.tv.webos",
-  "version": "1.0.14",
+  "version": "1.0.17",
   "vendor": "bullix",
   "type": "web",
   "main": "index.html",
