@@ -6,6 +6,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "serve": "npm run build && npx playwright install chromium && node scripts/dev-server.mjs",
+    "serve:node": "npm run build && IDLIX_NO_CHROMIUM=1 node scripts/dev-server.mjs",
     "package": "npm run build && npx ares-package dist ./service/com.idlix.tv.webos.proxy -o ."
   },
   "dependencies": {

@@ -51,8 +51,7 @@ function setPlaybackProxyUrl(url) {
   const prefs = loadPrefs();
   prefs.playbackProxyUrl = normalizeProxyBase(url);
   savePrefs(prefs);
-  proxyBase = "";
-  proxyReady = null;
+  resetProxyState();
 }
 
 function getPlaybackProxyUrl() {
@@ -219,9 +218,33 @@ const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const PROXY_SERVICE = "luna://com.idlix.tv.webos.proxy";
+const PROXY_HEALTH_TTL_MS = 12 * 1000;
+const PROXY_FETCH_RETRIES = 2;
 
 let proxyBase = "";
 let proxyReady = null;
+let proxyHealthAt = 0;
+let lunaProxyReady = false;
+
+function resetProxyState() {
+  proxyBase = "";
+  proxyReady = null;
+  proxyHealthAt = 0;
+  lunaProxyReady = false;
+}
+
+function isLoopbackProxy(base) {
+  return /^(https?:\/\/)?(127\.0\.0\.1|localhost)(:|\/|$)/i.test(String(base || ""));
+}
+
+function isLikelyProxyConnError(err) {
+  const msg = String((err && err.message) || err || "");
+  return (
+    /failed to fetch|networkerror|load failed|connection refused|err_connection_refused/i.test(
+      msg
+    ) || (err && err.name === "TypeError")
+  );
+}
 
 function isWebOSTv() {
   if (typeof window === "undefined") return false;
@@ -238,13 +261,17 @@ function isLocalBrowser() {
 function htmlForbiddenMessage(status, text) {
   const body = String(text || "");
   if (/Cross-site request blocked/i.test(body)) {
-    return "Claim ditolak (Origin). Jalankan npm run serve lalu isi Pengaturan → URL proxy pemutaran.";
+    return isWebOSTv()
+      ? "Claim ditolak (Origin). Isi Pengaturan → URL proxy PC (npm run serve:node, IP LAN)."
+      : "Claim ditolak (Origin). Jalankan npm run serve:node.";
   }
   if (/Just a moment|cf-mitigated|challenges\.cloudflare|cdn-cgi/i.test(body)) {
-    return "Cloudflare challenge. Tunggu Chromium warmup (npm run serve) selesai.";
+    return isWebOSTv()
+      ? "Cloudflare. Pastikan serve:node + .venv-impersonate, URL PC = IP LAN (bukan 127.0.0.1)."
+      : "Cloudflare. npm run serve:node dengan .venv-impersonate (bukan Chromium).";
   }
   if (Number(status) === 403 || /<!DOCTYPE|<html/i.test(body)) {
-    return "403 HTML dari CDN/WAF. Jangan lewat Node proxy jika Cloudflare aktif.";
+    return "403 HTML (Cloudflare). TV: Pengaturan → URL proxy PC dari npm run serve:node.";
   }
   return body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
 }
@@ -266,6 +293,14 @@ function lunaRequest(uri, method, parameters) {
   });
 }
 
+function proxyHealthOk(j) {
+  if (!j || j.ok === false) return false;
+  if (j.chromium === true || j.nodeProxy === true || j.onDevice === true || j.impersonate === true) {
+    return true;
+  }
+  return !!(j.ok && j.base);
+}
+
 function probeHealth(base) {
   const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), 10000) : null;
@@ -273,7 +308,9 @@ function probeHealth(base) {
     .then(async (res) => {
       if (!res.ok) throw new Error("health not ok");
       const j = await res.json().catch(() => ({}));
-      if (j && j.chromium === false) throw new Error("chromium not ready");
+      if (!proxyHealthOk(j)) {
+        throw new Error("proxy not ready");
+      }
       return base;
     })
     .finally(() => {
@@ -281,46 +318,145 @@ function probeHealth(base) {
     });
 }
 
-async function ensureProxy() {
-  if (proxyBase) return proxyBase;
-  if (proxyReady) return proxyReady;
+async function startTvProxyService() {
+  const info = await lunaRequest(PROXY_SERVICE, "startProxy", {});
+  if (info && info.returnValue === false) {
+    throw new Error((info.errorText && String(info.errorText)) || "startProxy gagal");
+  }
+  lunaProxyReady = true;
+  const base = info && info.base ? String(info.base) : "";
+  if (base) {
+    try {
+      await probeHealth(base);
+      proxyBase = base;
+      proxyHealthAt = Date.now();
+    } catch (_) {
+      proxyBase = "";
+    }
+  }
+  return proxyBase;
+}
+
+function lunaResponse(info) {
+  const status = Number(info && info.status) || 0;
+  const text = String((info && info.body) || "");
+  const ct = String((info && info.contentType) || "");
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {
+      get(name) {
+        return /content-type/i.test(String(name || "")) ? ct : null;
+      },
+    },
+    text: () => Promise.resolve(text),
+    json: () => Promise.resolve(JSON.parse(text)),
+  };
+}
+
+async function lunaProxyFetch(absoluteUrl, init) {
+  const headers = (init && init.headers) || {};
+  const info = await lunaRequest(PROXY_SERVICE, "proxyFetch", {
+    url: absoluteUrl,
+    method: (init && init.method) || "GET",
+    body: init && init.body != null ? String(init.body) : "",
+    contentType: headers["Content-Type"] || headers["content-type"] || "",
+    cookie: headers["X-Idlix-Cookie"] || "",
+  });
+  if (info && info.returnValue === false) {
+    throw new Error((info.errorText && String(info.errorText)) || "luna proxyFetch gagal");
+  }
+  return lunaResponse(info);
+}
+
+async function refreshProxyIfStale() {
+  if (!proxyBase) return false;
+  const ttl = isWebOSTv() ? PROXY_HEALTH_TTL_MS : 30 * 1000;
+  const due = !proxyHealthAt || Date.now() - proxyHealthAt > ttl;
+  if (!due) return true;
+  try {
+    await probeHealth(proxyBase);
+    proxyHealthAt = Date.now();
+    return true;
+  } catch (_) {
+    resetProxyState();
+    return false;
+  }
+}
+
+async function ensureProxy(opts = {}) {
+  if (opts.force) resetProxyState();
+
+  const pref = getPlaybackProxyUrl();
+  if (proxyBase && !opts.force) {
+    if (pref && proxyBase !== pref) {
+      resetProxyState();
+    } else {
+      const ok = await refreshProxyIfStale();
+      if (ok) return proxyBase;
+    }
+  }
+  if (lunaProxyReady && isWebOSTv() && !pref && !opts.force) {
+    return proxyBase || "";
+  }
+
+  if (proxyReady && !opts.force) return proxyReady;
 
   proxyReady = (async () => {
     if (isLocalBrowser()) {
       const local = `${location.protocol}//${location.host}`;
       await probeHealth(local);
       proxyBase = local;
+      proxyHealthAt = Date.now();
       return proxyBase;
     }
-    const pref = getPlaybackProxyUrl();
+
+    if (isWebOSTv()) {
+      if (pref) {
+        if (isLoopbackProxy(pref)) {
+          throw new Error(
+            "URL proxy PC tidak boleh 127.0.0.1 (itu TV, bukan Mac). Isi http://IP-LAN:5173 dari npm run serve:node."
+          );
+        }
+        try {
+          await probeHealth(pref);
+          lunaProxyReady = false;
+          proxyBase = pref;
+          proxyHealthAt = Date.now();
+          return proxyBase;
+        } catch (e) {
+          throw new Error(
+            `Proxy PC tidak terjangkau (${pref}). npm run serve:node + .venv-impersonate? Satu Wi‑Fi? Mac firewall? ${e && e.message ? e.message : e}`
+          );
+        }
+      }
+      let builtinErr = null;
+      try {
+        await startTvProxyService();
+        return proxyBase || "";
+      } catch (e) {
+        builtinErr = e instanceof Error ? e : new Error(String(e));
+        lunaProxyReady = false;
+      }
+      const hint =
+        "Pasang ulang IPK terbaru (npm run package) jika layanan proxy ikut ter-bundle.";
+      throw new Error(
+        `Proxy bawaan TV gagal${builtinErr?.message ? `: ${builtinErr.message}` : ""}. ${hint} Opsional: Pengaturan → URL proxy PC (npm run serve:node).`
+      );
+    }
+
     if (pref) {
       await probeHealth(pref);
       proxyBase = pref;
+      proxyHealthAt = Date.now();
       return proxyBase;
-    }
-    if (isWebOSTv()) {
-      throw new Error(
-        "Playback butuh proxy PC. Pengaturan → URL proxy pemutaran = http://IP-PC:5173 (npm run serve)."
-      );
-    }
-    try {
-      const info = await lunaRequest(PROXY_SERVICE, "startProxy", {});
-      if (info && info.base) {
-        proxyBase = info.base;
-        return proxyBase;
-      }
-    } catch (_) {
-      /* TV without JS service */
     }
     return "";
   })().catch((err) => {
     proxyReady = null;
     if (isLocalBrowser()) {
-      throw new Error(`Jalankan npm run serve (Chromium proxy). ${err && err.message ? err.message : err}`);
-    }
-    if (isWebOSTv() && getPlaybackProxyUrl()) {
       throw new Error(
-        `Proxy tidak terjangkau dari TV (${getPlaybackProxyUrl()}). PC menyala? npm run serve? Satu Wi‑Fi?`
+        `Jalankan npm run serve:node. ${err && err.message ? err.message : err}`
       );
     }
     if (isWebOSTv()) {
@@ -380,28 +516,67 @@ function isWatchApiPath(path) {
   return /api\/watch|api\/playback|session\/claim/.test(String(path || ""));
 }
 
+async function fetchProxiedResponse(absoluteUrl, init, useProxy) {
+  if (isWebOSTv() && useProxy) {
+    const pref = getPlaybackProxyUrl();
+    if (pref) {
+      await ensureProxy();
+    } else {
+      try {
+        await ensureProxy();
+      } catch (_) {
+        /* Luna-only path */
+      }
+      try {
+        if (!lunaProxyReady) {
+          await startTvProxyService();
+        }
+        return await lunaProxyFetch(absoluteUrl, init);
+      } catch (lunaErr) {
+        if (!proxyBase) throw lunaErr;
+      }
+    }
+  }
+  let lastErr;
+  const retries = useProxy && (isWebOSTv() || isLocalBrowser()) ? PROXY_FETCH_RETRIES : 1;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    if (attempt > 0) {
+      resetProxyState();
+    }
+    let base = "";
+    try {
+      base = await ensureProxy({ force: attempt > 0 });
+    } catch (err) {
+      if (isWebOSTv() && useProxy) throw err;
+    }
+    const viaProxy = !!base && (isLocalBrowser() || useProxy);
+    const target = viaProxy ? proxiedUrl(absoluteUrl) : absoluteUrl;
+    try {
+      return await fetch(target, init);
+    } catch (err) {
+      lastErr = err;
+      if (attempt + 1 >= retries || !viaProxy || !isLikelyProxyConnError(err)) {
+        throw err;
+      }
+    }
+  }
+  throw lastErr || new Error("fetch gagal");
+}
+
 async function fetchJson(path, options = {}) {
   const url = new URL(path.replace(/^\//, ""), getBaseUrl()).toString();
   const watchPath = isWatchApiPath(path) || options.useProxy;
-  let base = "";
-  try {
-    base = await ensureProxy();
-  } catch (err) {
-    if (isWebOSTv() && watchPath) throw err;
-    base = "";
-  }
-  const viaChromium = !!base && (isLocalBrowser() || watchPath || options.useProxy);
-  const target = viaChromium ? proxiedUrl(url) : url;
   const headers = catalogHeaders(options.headers || {});
   if (options.idlixCookie) {
     headers["X-Idlix-Cookie"] = options.idlixCookie;
   }
-  const res = await fetch(target, {
+  const init = {
     method: options.method || "GET",
     headers,
     body: options.body,
     credentials: "omit",
-  });
+  };
+  const res = await fetchProxiedResponse(url, init, watchPath || options.useProxy);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${res.status} ${htmlForbiddenMessage(res.status, text)}`);
@@ -458,9 +633,36 @@ function extractTokenQuery(masterUrl) {
 }
 
 function appendTokenToUrl(url, tokenQuery) {
-  if (!tokenQuery || url.indexOf("t=") !== -1) return url;
+  if (!tokenQuery || /(?:\?|&)t=/.test(url)) return url;
   const sep = url.indexOf("?") !== -1 ? "&" : "?";
   return `${url}${sep}${tokenQuery}`;
+}
+
+function resolveLoaderUrl(url, context) {
+  let s = String(url || "");
+  if (!s) return s;
+  if (s.startsWith("/p?") && proxyBase) {
+    try {
+      s = new URL(s, proxyBase).href;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!/^https?:\/\//i.test(s) && context) {
+    const base =
+      context.frag?.baseurl ||
+      context.frag?.url ||
+      context.levelDetails?.url ||
+      context.deliveryDirectives?.baseUrl;
+    if (base) {
+      try {
+        s = new URL(s, base).href;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return s;
 }
 
 /** Same as Android: full query string from master playlist URL */
@@ -476,20 +678,25 @@ function tokenQueryFromMaster(masterUrl) {
 function buildHlsConfig(Hls, tokenQuery) {
   const config = {
     enableWorker: !isWebOSTv(),
+    manifestLoadingMaxRetry: 4,
+    levelLoadingMaxRetry: 4,
+    fragLoadingMaxRetry: 6,
+    startFragPrefetch: true,
   };
   const BaseLoader = Hls.DefaultConfig.loader;
   if (typeof BaseLoader !== "function") return config;
   class IdlixLoader extends BaseLoader {
     load(context, cfg, callbacks) {
       if (context && context.url) {
-        let url = String(context.url);
+        let url = resolveLoaderUrl(context.url, context);
         if (proxyBase) {
           const inner = unwrapProxied(url);
-          const withTok =
-            tokenQuery && inner.indexOf("t=") === -1 ? appendTokenToUrl(inner, tokenQuery) : inner;
+          const withTok = tokenQuery ? appendTokenToUrl(inner, tokenQuery) : inner;
           context.url = proxiedUrl(withTok);
-        } else if (tokenQuery && url.indexOf("t=") === -1) {
+        } else if (tokenQuery) {
           context.url = appendTokenToUrl(url, tokenQuery);
+        } else {
+          context.url = url;
         }
       }
       super.load(context, cfg, callbacks);
@@ -518,7 +725,26 @@ function waitForVideoEvent(video, eventName, timeoutMs) {
   });
 }
 
-async function tryNativeHls(video, masterUrl) {
+async function tryPlayVideo(video) {
+  try {
+    await video.play();
+    if (!video.paused) return true;
+  } catch (_) {
+    /* autoplay may require mute */
+  }
+  const wasMuted = video.muted;
+  video.muted = true;
+  try {
+    await video.play();
+    video.muted = wasMuted;
+    return !video.paused;
+  } catch (_) {
+    video.muted = wasMuted;
+    return false;
+  }
+}
+
+async function tryNativeHls(video, masterUrl, timeoutMs = 2500) {
   video.removeAttribute("crossorigin");
   video.src = masterUrl;
   video.load();
@@ -530,9 +756,9 @@ async function tryNativeHls(video, masterUrl) {
     }
     return video.readyState >= 1;
   }
-  const played = await waitForVideoEvent(video, "playing", 5000);
+  const played = await waitForVideoEvent(video, "playing", timeoutMs);
   if (played || video.readyState >= 1) return true;
-  await waitForVideoEvent(video, "loadedmetadata", 8000);
+  await waitForVideoEvent(video, "loadedmetadata", timeoutMs);
   if (video.readyState < 1) return false;
   try {
     await video.play();
@@ -602,18 +828,13 @@ const IdlixApi = {
     return fetchJson(`api/playback/resolve?${q}`);
   },
   async redeemPlay(url, claim) {
-    if (isWebOSTv() || isLocalBrowser()) {
-      await ensureProxy();
-    } else {
-      await ensureProxy().catch(() => "");
-    }
-    const target = proxyBase ? proxiedUrl(url) : url;
-    const res = await fetch(target, {
+    const init = {
       method: "POST",
       credentials: "omit",
       headers: catalogHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ claim, mode: "browser" }),
-    });
+    };
+    const res = await fetchProxiedResponse(url, init, true);
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`Redeem failed ${res.status}: ${htmlForbiddenMessage(res.status, text)}`);
@@ -1259,12 +1480,12 @@ function renderSettings() {
       <p style="color:#a3a3a3;font-size:14px;margin-top:12px">Default: https://z2.idlixku.com/</p>
     </div>
     <div class="settings-block">
-      <label for="playback-proxy">URL proxy pemutaran (PC dengan npm run serve)</label>
-      <input id="playback-proxy" type="url" placeholder="http://192.168.1.10:5173" value="${escapeHtml(proxyPref)}" autocomplete="off" />
+      <label for="playback-proxy">URL proxy PC (npm run serve:node)</label>
+      <input id="playback-proxy" type="url" placeholder="kosongkan untuk TV saja" value="${escapeHtml(proxyPref)}" autocomplete="off" />
       <div class="btn-row" style="margin-top:16px">
         <button class="btn btn--primary" type="button" id="save-proxy">Simpan proxy</button>
       </div>
-      <p style="color:#a3a3a3;font-size:14px;margin-top:12px">Wajib agar claim/HLS lolos Origin + Cloudflare. Laptop dan TV harus satu Wi‑Fi.</p>
+      <p style="color:#a3a3a3;font-size:14px;margin-top:12px">Jika diisi, TV memakai PC ini (Luna dilewati). Pakai IP LAN, bukan 127.0.0.1: http://192.168.x.x:5173 dari npm run serve:node, satu Wi‑Fi. Kosongkan untuk proxy bawaan TV.</p>
     </div>
     <div class="settings-block">
       <button class="btn btn--secondary" type="button" id="clear-history">Hapus riwayat tontonan</button>
@@ -1533,7 +1754,28 @@ function pickSubtitleMeta(tracks) {
 }
 
 async function fetchVttCues(url) {
-  const res = await fetch(url, { credentials: "omit", cache: "no-store" });
+  const init = { credentials: "omit", cache: "no-store" };
+  let lastErr;
+  const proxiedHop = /^https?:\/\/127\.0\.0\.1(:\d+)?\/p\?/i.test(String(url));
+  const tries = proxiedHop && isWebOSTv() ? PROXY_FETCH_RETRIES : 1;
+  let res;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      let target = url;
+      if (attempt > 0) {
+        resetProxyState();
+        await ensureProxy({ force: true });
+        const inner = unwrapProxied(url);
+        target = proxyBase ? proxiedUrl(inner) : inner;
+      }
+      res = await fetch(target, init);
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (attempt + 1 >= tries || !isLikelyProxyConnError(err)) throw err;
+    }
+  }
+  if (!res) throw lastErr || new Error("Subtitle fetch gagal");
   if (!res.ok) throw new Error(`Subtitle HTTP ${res.status}`);
   const ct = res.headers.get("content-type") || "";
   const data = await res.text();
@@ -1724,7 +1966,7 @@ async function renderPlayer(params) {
   appEl.innerHTML = `
     <div class="player-root" id="player-root">
       <div class="player-video-wrap" id="player-stage" tabindex="-1">
-        <video id="video" playsinline webkit-playsinline controlsList="nodownload"></video>
+        <video id="video" autoplay playsinline webkit-playsinline controlsList="nodownload"></video>
         <div class="player-chrome" id="player-overlay">
           <div class="player-top">
             <button class="player-back" type="button" id="btn-back">
@@ -1783,6 +2025,7 @@ async function renderPlayer(params) {
   let chromeSticky = true;
   let hasError = false;
   let streamReady = false;
+  let setupLock = true;
 
   function leavePlayer() {
     cleanup();
@@ -2000,6 +2243,7 @@ async function renderPlayer(params) {
   });
 
   video.addEventListener("error", () => {
+    if (setupLock || streamReady) return;
     const code = video.error ? video.error.code : 0;
     hasError = true;
     statusEl.textContent = `Gagal memutar video (kode ${code}). Tekan Putar atau Kembali.`;
@@ -2042,36 +2286,57 @@ async function renderPlayer(params) {
       video.canPlayType("application/x-mpegURL");
 
     const Hls = await loadHlsScript();
+    let hlsNetworkRetries = 0;
     if (Hls.isSupported()) {
       usedMseHls = true;
       statusEl.textContent = "Memuat video…";
       hlsInstance = new Hls(buildHlsConfig(Hls, tokenQuery));
       hlsInstance.on(Hls.Events.ERROR, (_ev, data) => {
-        if (!data || !data.fatal) return;
+        if (!data) return;
         const detail = data.details || data.type || "unknown";
-        showPlayerError(`HLS error: ${detail}. Tekan Putar atau Kembali.`);
-        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        const httpCode = data.response && data.response.code;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && hlsNetworkRetries < 4) {
+          hlsNetworkRetries += 1;
           try {
-            hlsInstance.recoverMediaError();
+            hlsInstance.startLoad();
+            return;
           } catch (_) {
             /* ignore */
           }
         }
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          try {
+            hlsInstance.recoverMediaError();
+            return;
+          } catch (_) {
+            /* ignore */
+          }
+        }
+        if (!data.fatal) return;
+        const hint = httpCode ? ` (HTTP ${httpCode})` : "";
+        showPlayerError(
+          `HLS: ${detail}${hint}. Cek Pengaturan URL proxy PC (npm run serve:node, IP LAN). Tekan Putar atau Kembali.`
+        );
+      });
+      hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+        tryPlayVideo(video);
+      });
+      hlsInstance.on(Hls.Events.MEDIA_ATTACHED, () => {
+        tryPlayVideo(video);
       });
       hlsInstance.loadSource(playUrl);
       hlsInstance.attachMedia(video);
-      started = await waitForVideoEvent(video, "playing", 15000);
+      started = await waitForVideoEvent(video, "playing", 8000);
       if (!started) {
-        try {
-          await video.play();
-          started = !video.paused;
-        } catch (_) {
-          started = video.readyState >= 1;
-        }
+        started = await tryPlayVideo(video);
       }
+      if (!started && video.readyState < 1) {
+        await waitForVideoEvent(video, "loadedmetadata", 8000);
+      }
+      started = !video.paused || video.readyState >= 1;
     } else if (canNative) {
       statusEl.textContent = "Memuat video…";
-      started = await tryNativeHls(video, playUrl);
+      started = await tryNativeHls(video, playUrl, 8000);
     } else {
       throw new Error("Perangkat tidak mendukung HLS.");
     }
@@ -2084,6 +2349,7 @@ async function renderPlayer(params) {
     }
     if (!streamReady) throw new Error("Stream belum siap. Tekan Kembali lalu coba lagi.");
 
+    setupLock = false;
     setControlsEnabled(true);
     chromeSticky = false;
     if (resolved.subtitles && resolved.subtitles.length) {
@@ -2097,20 +2363,19 @@ async function renderPlayer(params) {
     }
 
     statusEl.textContent = "";
-    try {
-      await video.play();
-    } catch (_) {
-      /* autoplay blocked */
-    }
+    await tryPlayVideo(video);
     if (video.paused) {
       setPlayingUi(false);
+      statusEl.textContent = "Tekan Putar";
       showChrome();
+      btnPlayBar.disabled = false;
       btnPlayBar.focus();
     } else {
       setPlayingUi(true);
       showChrome();
     }
   } catch (e) {
+    setupLock = false;
     setControlsEnabled(false);
     showPlayerError((e && e.message) || "Terjadi kesalahan");
   }
@@ -2156,6 +2421,7 @@ function boot() {
   if (isWebOSTv()) {
     document.documentElement.classList.add("env-tv");
     document.body.classList.add("env-tv");
+    ensureProxy().catch(() => {});
   }
   if (!appEl) {
     document.body.innerHTML =

@@ -135,9 +135,21 @@ npm run serve
 
 First run downloads Chromium (slow once). Open **http://127.0.0.1:5173**.
 
-### Play on the LG TV
+**Without Chromium** (`npm run serve:node`): uses **`curl_cffi` Chrome TLS** if `.venv-impersonate` exists (`/health` has `"impersonate": true`). Otherwise Node/curl (often CF 403).
 
-Keep `npm run serve` running on the PC (same Wi‑Fi as the TV). In the app: **Pengaturan → URL proxy pemutaran** = `http://<PC-LAN-IP>:5173` (printed in the terminal). Then Putar.
+```bash
+python3 -m venv .venv-impersonate
+.venv-impersonate/bin/pip install -r scripts/requirements-impersonate.txt
+npm run serve:node
+```
+
+Use `npm run serve` only if CF still serves a JS challenge.
+
+### Play on the LG TV (TV-only)
+
+1. `npm run package` → install the IPK on the TV (`ares-install` / Developer Mode).
+2. Empty proxy URL: watch APIs use **Luna `proxyFetch`** (TV curl/Node).
+3. To use the PC proxy: `npm run serve:node`, same Wi‑Fi, **Pengaturan → URL proxy PC** = `http://<PC-LAN-IP>:5173` (printed in the terminal — **not** `127.0.0.1`). The app skips Luna and sends claim/HLS to that host.
 
 ## CSP
 
